@@ -1,0 +1,13 @@
+services:
+  tanktok:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - tanktok-data:/app/data
+    environment:
+      - TANKTOK_DB_PATH=/app/data/tanktok_cache.db
+
+volumes:
+  tanktok-data:
