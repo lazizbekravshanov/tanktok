@@ -3,6 +3,10 @@
 import os
 from dataclasses import dataclass, field
 
+from dotenv import load_dotenv
+
+load_dotenv()  # reads .env into os.environ
+
 
 @dataclass(frozen=True)
 class Config:
@@ -81,8 +85,9 @@ class Config:
     cache_retail_ttl: int = 6 * 3600          # 6 hours
     cache_market_ttl: int = 300               # 5 minutes
 
-    # POI search radius (meters)
-    poi_radius: int = 25000  # 25 km
+    # Truck stop search radius
+    poi_radius: int = 80467  # 50 miles in meters (legacy compat)
+    poi_radius_mi: int = 50  # 50 miles
 
     # Database path
     db_path: str = field(

@@ -25,7 +25,7 @@ from app.providers.base import (
 )
 from app.providers.geocode_osm import NominatimGeoProvider
 from app.providers.markets_yfinance import YFinanceMarketProvider
-from app.providers.pois_overpass import OverpassPOIProvider
+from app.providers.pois_truckstops import TruckStopDB
 from app.providers.prediction_base import DisabledPredictionProvider
 from app.providers.prediction_kalshi import KalshiPredictionProvider
 from app.providers.prediction_polymarket import PolymarketPredictionProvider
@@ -45,7 +45,7 @@ class BotHandlers:
 
         # Core providers
         self.geo = NominatimGeoProvider(config, cache)
-        self.pois = OverpassPOIProvider(config, cache)
+        self.pois = TruckStopDB(config)
         self.retail = EIARetailProvider(config, cache)
         self.markets = YFinanceMarketProvider(config, cache)
 
@@ -78,7 +78,7 @@ class BotHandlers:
             "<b>Welcome to TankTok!</b>\n\n"
             "Send me a <b>US ZIP code</b> or <b>city name</b> and I'll return:\n"
             "  • Gas &amp; diesel prices for your area\n"
-            "  • Nearby fuel stations\n"
+            "  • Nearby truck stops (Pilot, Love's, TA, etc.)\n"
             "  • Energy market snapshot\n"
             "  • 7-day price forecast\n\n"
             "<b>Examples:</b>\n"
@@ -100,7 +100,7 @@ class BotHandlers:
             "(e.g. <code>Miami, FL</code>) and hit send.\n\n"
             "<b>What you get:</b>\n"
             "1. Area-level retail prices (gas + diesel) from EIA\n"
-            "2. Up to 10 nearby fuel stations from OpenStreetMap\n"
+            "2. Up to 10 nearby truck stops / travel centers from OpenStreetMap\n"
             "3. Energy futures snapshot (WTI, RBOB, Heating Oil)\n"
             "4. Simple 7-day price forecast\n\n"
             "<b>Data sources:</b>\n"
@@ -117,7 +117,8 @@ class BotHandlers:
     async def cmd_sources(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         lines = ["<b>Enabled Data Sources</b>\n"]
         lines.append("• Geocoding: Nominatim (OSM) ✓")
-        lines.append("• Nearby stations: Overpass API ✓")
+        n_stops = len(self.pois._stops) if hasattr(self.pois, '_stops') else 0
+        lines.append(f"• Truck stop database: {n_stops:,} locations ✓")
 
         if self.config.eia_api_key:
             lines.append("• Retail prices: U.S. EIA ✓")
@@ -325,11 +326,11 @@ class BotHandlers:
     def _fmt_stations(stations: list[Station]) -> str:
         if not stations:
             return (
-                "<b>📍 Nearby Stations</b>\n"
-                "<i>No stations found in this area.</i>\n"
+                "<b>🚛 Nearby Truck Stops</b>\n"
+                "<i>No truck stops found in this area.</i>\n"
             )
 
-        lines = ["<b>📍 Nearby Stations</b>"]
+        lines = ["<b>🚛 Nearby Truck Stops</b>"]
         for i, s in enumerate(stations, 1):
             name = _esc(s.name)
             addr = _esc(s.address)
