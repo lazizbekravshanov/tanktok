@@ -51,14 +51,25 @@ class BotHandlers:
 
         # Prediction providers (optional)
         self.prediction_providers = []
-        kalshi = KalshiPredictionProvider(config)
+        self.kalshi = KalshiPredictionProvider(config, cache)
+        self.prediction_providers.append(self.kalshi)
         polymarket = PolymarketPredictionProvider(config)
-        if kalshi.is_configured():
-            self.prediction_providers.append(kalshi)
         if polymarket.is_configured():
             self.prediction_providers.append(polymarket)
-        if not self.prediction_providers:
-            self.prediction_providers.append(DisabledPredictionProvider())
+
+    async def startup(self) -> None:
+        """Called once when the bot starts — initializes async providers."""
+        try:
+            await self.kalshi.start()
+        except Exception:
+            logger.exception("Kalshi startup failed — will use REST fallback")
+
+    async def shutdown(self) -> None:
+        """Called on bot shutdown."""
+        try:
+            await self.kalshi.stop()
+        except Exception:
+            logger.exception("Kalshi shutdown error")
 
     # ---- Commands ----
 
@@ -125,11 +136,25 @@ class BotHandlers:
         else:
             lines.append("• Station prices: Commercial feed ✗ (not configured)")
 
-        pred_ok = any(p.is_configured() for p in self.prediction_providers)
-        if pred_ok:
-            lines.append("• Prediction markets: ✓")
+        # Kalshi status
+        if self.kalshi._ws.is_connected:
+            lines.append("• Kalshi: ✓ WebSocket (live)")
+            lines.append(f"  └ Tracking {len(self.kalshi._market_tickers)} contracts")
+        elif self.kalshi._market_tickers:
+            lines.append("• Kalshi: ✓ REST polling")
+            lines.append(f"  └ Tracking {len(self.kalshi._market_tickers)} contracts")
+        elif self.config.kalshi_key_id:
+            lines.append("• Kalshi: ⚠ configured but no markets discovered")
         else:
-            lines.append("• Prediction markets: ✗ (not configured)")
+            lines.append("• Kalshi: ✓ public mode (no auth)")
+
+        # Other prediction providers
+        has_polymarket = any(
+            p.is_configured() for p in self.prediction_providers
+            if not isinstance(p, KalshiPredictionProvider)
+        )
+        if has_polymarket:
+            lines.append("• Polymarket: ✓")
 
         lines.append(f"\n<i>Bot started: {_started_at:%Y-%m-%d %H:%M UTC}</i>")
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
@@ -380,11 +405,46 @@ class BotHandlers:
             )
 
         lines = ["<b>🎲 Prediction Markets</b>"]
-        for c in contracts:
-            lines.append(
-                f"  [{c.market}] {_esc(c.title)}\n"
-                f"    Yes: ${c.yes_price:.2f} / No: ${c.no_price:.2f}"
-            )
+
+        # Group by category
+        gas = [c for c in contracts if c.category == "gas"]
+        oil = [c for c in contracts if c.category in ("oil_daily", "oil_weekly")]
+        other = [c for c in contracts if c.category not in ("gas", "oil_daily", "oil_weekly")]
+
+        for label, group in [("US Gas Price", gas), ("WTI Oil", oil), ("Other", other)]:
+            if not group:
+                continue
+            lines.append(f"\n  <b>{label}</b>")
+            for c in group[:8]:  # cap per group
+                title = _esc(c.title)
+                # Compact price display
+                price_parts = []
+                if c.yes_bid is not None and c.yes_ask is not None:
+                    price_parts.append(f"Bid ${c.yes_bid:.2f} / Ask ${c.yes_ask:.2f}")
+                elif c.yes_price > 0:
+                    price_parts.append(f"Yes ${c.yes_price:.2f}")
+                if c.last_price is not None and c.last_price > 0:
+                    price_parts.append(f"Last ${c.last_price:.2f}")
+                price_str = " | ".join(price_parts) if price_parts else "no price"
+
+                vol_str = ""
+                if c.volume > 0:
+                    vol_str = f" vol:{c.volume:,.0f}"
+
+                fresh = ""
+                if c.freshness == "live":
+                    fresh = " ⚡"
+                elif c.freshness == "recent":
+                    fresh = ""
+
+                lines.append(f"  • {title}{fresh}")
+                lines.append(f"    {price_str}{vol_str}")
+
+        # Source note
+        has_live = any(c.freshness == "live" for c in contracts)
+        if has_live:
+            lines.append("\n  <i>⚡ = live via Kalshi WebSocket</i>")
+
         lines.append("")
         return "\n".join(lines)
 

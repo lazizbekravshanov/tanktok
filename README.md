@@ -24,7 +24,7 @@ Send a **ZIP code** or **city name** → get gas & diesel prices, nearby station
 | 💰 | **Station prices** | Posted prices when a plugin is configured |
 | 📈 | **Market snapshot** | WTI crude, RBOB gasoline, Heating Oil futures |
 | 🔮 | **7-day forecast** | Naive model using retail history + futures trend |
-| 🎲 | **Prediction markets** | Optional Kalshi / Polymarket connectors |
+| 🎲 | **Prediction markets** | Kalshi integration (REST + WebSocket) with live energy contracts |
 | 🔌 | **Plugin architecture** | Add price feeds via env vars — zero code changes |
 
 ## 🚀 Quick Start
@@ -77,7 +77,10 @@ docker run --env-file .env tanktok
 | `CROWD_API_BASE` | ❌ | Base URL for crowd-sourced API |
 | `COMMERCIAL_FEED_KEY` | ❌ | Commercial station price feed key |
 | `COMMERCIAL_FEED_BASE` | ❌ | Base URL for commercial feed |
-| `KALSHI_API_TOKEN` | ❌ | Kalshi prediction market token |
+| `KALSHI_KEY_ID` | ❌ | Kalshi API key ID ([generate here](https://kalshi.com/account/api-keys)) |
+| `KALSHI_PRIVATE_KEY_PATH` | ❌ | Path to Kalshi RSA private key PEM file |
+| `KALSHI_USE_WEBSOCKET` | ❌ | `true` (default) for live streaming, `false` for REST only |
+| `KALSHI_POLL_INTERVAL` | ❌ | REST poll interval in seconds (default: `45`) |
 | `POLYMARKET_API_TOKEN` | ❌ | Polymarket API token |
 | `NOMINATIM_USER_AGENT` | ❌ | Custom User-Agent for Nominatim |
 | `TANKTOK_DB_PATH` | ❌ | SQLite cache path (default: `tanktok_cache.db`) |
@@ -121,8 +124,18 @@ docker run --env-file .env tanktok
     Confidence: Medium — based on weekly EIA data + futures
 
 🎲 Prediction Markets
-  No matching prediction market contracts found
-  for fuel prices today.
+
+  US Gas Price
+  • Will gas exceed $3.25/gal? ⚡
+    Bid $0.45 / Ask $0.48 | Last $0.46 vol:1,234
+  • Will gas exceed $3.50/gal? ⚡
+    Bid $0.22 / Ask $0.25 | Last $0.23 vol:567
+
+  WTI Oil
+  • WTI above $68 on Mar 2? ⚡
+    Bid $0.61 / Ask $0.64 | Last $0.62 vol:2,100
+
+  ⚡ = live via Kalshi WebSocket
 
 🕐 2025-02-25 14:32 UTC
 ```
@@ -141,13 +154,37 @@ app/
 │   ├── retail_eia.py       # EIA retail prices
 │   ├── markets_yfinance.py # yfinance energy futures
 │   ├── prediction_base.py  # Disabled prediction stub
-│   ├── prediction_kalshi.py
+│   ├── prediction_kalshi.py # Kalshi REST + WebSocket (RSA-PSS auth)
 │   └── prediction_polymarket.py
 ├── forecasting/
 │   └── model.py            # Simple price forecast
 └── storage/
     └── cache.py            # SQLite cache with TTL
 ```
+
+### 🎲 Kalshi Integration
+
+TankTok connects to [Kalshi](https://kalshi.com) for real-time energy prediction markets:
+
+| Series | Ticker | Description |
+|---|---|---|
+| US Gas Price | `KXAAAGASM` | Monthly contracts on US average gas prices |
+| WTI Oil Daily | `KXWTI` | Daily contracts on WTI crude settlement |
+| WTI Oil Weekly | `KXWTIW` | Weekly contracts on WTI crude Friday close |
+
+**Two modes:**
+
+| Mode | Auth Required | Latency | How |
+|---|---|---|---|
+| **Public REST** | No | ~45s polling | Default — works out of the box |
+| **WebSocket** | Yes (RSA key) | Sub-second | Set `KALSHI_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` |
+
+To enable WebSocket streaming:
+1. Go to [Kalshi API Keys](https://kalshi.com/account/api-keys)
+2. Generate an RSA key pair — **save the private key immediately**
+3. Set `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` in `.env`
+
+The bot auto-discovers all open energy contracts on startup and re-discovers hourly.
 
 ### 🔌 Adding a price provider
 

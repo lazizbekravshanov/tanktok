@@ -32,15 +32,32 @@ class Config:
         default_factory=lambda: os.environ.get("COMMERCIAL_FEED_BASE", "")
     )
 
-    # Optional prediction markets
-    kalshi_api_token: str = field(
-        default_factory=lambda: os.environ.get("KALSHI_API_TOKEN", "")
+    # Kalshi prediction markets (RSA-PSS auth)
+    kalshi_key_id: str = field(
+        default_factory=lambda: os.environ.get("KALSHI_KEY_ID", "")
+    )
+    kalshi_private_key_path: str = field(
+        default_factory=lambda: os.environ.get("KALSHI_PRIVATE_KEY_PATH", "")
     )
     kalshi_api_base: str = field(
         default_factory=lambda: os.environ.get(
-            "KALSHI_API_BASE", "https://trading-api.kalshi.com"
+            "KALSHI_API_BASE", "https://api.elections.kalshi.com"
         )
     )
+    kalshi_ws_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "KALSHI_WS_URL", "wss://api.elections.kalshi.com/trade-api/ws/v2"
+        )
+    )
+    kalshi_use_websocket: bool = field(
+        default_factory=lambda: os.environ.get("KALSHI_USE_WEBSOCKET", "true").lower() == "true"
+    )
+    kalshi_poll_interval: int = field(
+        default_factory=lambda: int(os.environ.get("KALSHI_POLL_INTERVAL", "45"))
+    )
+
+    # Kalshi energy series tickers to track
+    kalshi_energy_series: tuple[str, ...] = ("KXAAAGASM", "KXWTI", "KXWTIW")
     polymarket_api_token: str = field(
         default_factory=lambda: os.environ.get("POLYMARKET_API_TOKEN", "")
     )

@@ -69,6 +69,16 @@ class PredictionContract:
     yes_price: float
     no_price: float
     url: str = ""
+    ticker: str = ""
+    volume: float = 0.0
+    open_interest: float = 0.0
+    last_price: Optional[float] = None
+    yes_bid: Optional[float] = None
+    yes_ask: Optional[float] = None
+    expiration: Optional[datetime] = None
+    category: str = ""  # "gas", "oil_daily", "oil_weekly"
+    strike: Optional[str] = None  # e.g. "B3.25" for "above $3.25"
+    freshness: str = ""  # "live", "recent", "cached"
 
 
 @dataclass

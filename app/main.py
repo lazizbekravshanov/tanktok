@@ -34,6 +34,18 @@ def main() -> None:
         .build()
     )
 
+    # Lifecycle hooks — start Kalshi WS on boot, clean up on shutdown
+    async def post_init(application) -> None:
+        logger.info("Initializing async providers…")
+        await handlers.startup()
+
+    async def post_shutdown(application) -> None:
+        logger.info("Shutting down async providers…")
+        await handlers.shutdown()
+
+    app.post_init = post_init
+    app.post_shutdown = post_shutdown
+
     # Register commands
     app.add_handler(CommandHandler("start", handlers.cmd_start))
     app.add_handler(CommandHandler("help", handlers.cmd_help))
