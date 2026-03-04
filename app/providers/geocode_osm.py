@@ -36,6 +36,89 @@ class NominatimGeoProvider(GeoProvider):
                 await asyncio.sleep(wait)
             _last_request_time = asyncio.get_event_loop().time()
 
+    async def reverse(self, lat: float, lon: float) -> Optional[str]:
+        """Reverse-geocode lat/lon into a street address string."""
+        cache_key = f"rev:{round(lat, 5)}:{round(lon, 5)}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        await self._throttle()
+
+        params = {
+            "lat": str(lat),
+            "lon": str(lon),
+            "format": "jsonv2",
+            "addressdetails": "1",
+            "zoom": "18",
+        }
+        headers = {"User-Agent": self._ua}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://nominatim.openstreetmap.org/reverse",
+                    params=params,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 429:
+                        return None
+                    resp.raise_for_status()
+                    data = await resp.json()
+        except Exception:
+            logger.exception("Nominatim reverse geocode failed")
+            return None
+
+        addr = data.get("address", {})
+        parts = []
+        # Street address
+        house = addr.get("house_number", "")
+        road = addr.get("road", "")
+        if house and road:
+            parts.append(f"{house} {road}")
+        elif road:
+            parts.append(road)
+
+        # City
+        city = addr.get("city") or addr.get("town") or addr.get("village") or ""
+        state = addr.get("state", "")
+        # Abbreviate state if possible
+        state_abbr = self._state_abbrev(state) or state
+        if city and state_abbr:
+            parts.append(f"{city}, {state_abbr}")
+        elif city:
+            parts.append(city)
+
+        # ZIP
+        postcode = addr.get("postcode", "")
+        if postcode:
+            parts.append(postcode)
+
+        result = ", ".join(parts) if parts else None
+        if result:
+            self._cache.set(cache_key, result, ttl=self._ttl)
+        return result
+
+    @staticmethod
+    def _state_abbrev(state_name: str) -> str:
+        mapping = {
+            "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+            "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+            "district of columbia": "DC", "florida": "FL", "georgia": "GA", "hawaii": "HI",
+            "idaho": "ID", "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+            "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+            "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+            "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+            "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+            "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+            "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI",
+            "south carolina": "SC", "south dakota": "SD", "tennessee": "TN", "texas": "TX",
+            "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA",
+            "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+        }
+        return mapping.get(state_name.strip().lower(), "")
+
     async def geocode(self, query: str) -> Optional[GeoLocation]:
         cache_key = f"geo:{query.strip().lower()}"
         cached = self._cache.get(cache_key)

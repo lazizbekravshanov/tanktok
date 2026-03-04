@@ -1,15 +1,20 @@
-"""Local truck stop database provider — fast radius lookup, no API calls."""
+"""Local truck stop database provider — fast radius lookup with address resolution."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import os
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from app.config import Config
 from app.providers.base import POIProvider, Station
+
+if TYPE_CHECKING:
+    from app.providers.geocode_google import GoogleGeocoder
+    from app.providers.geocode_osm import NominatimGeoProvider
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +37,20 @@ def _haversine_mi(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 class TruckStopDB(POIProvider):
     """
     Pre-loaded database of ~3,700+ truck stops across the US.
-    Uses simple lat/lon bounding-box pre-filter + haversine for radius search.
+    Uses bounding-box pre-filter + haversine for radius search.
+    Resolves missing addresses via Google Maps (primary) or Nominatim (fallback).
     """
 
-    def __init__(self, config: Config, db_path: str = "") -> None:
+    def __init__(
+        self,
+        config: Config,
+        google_geocoder: Optional[GoogleGeocoder] = None,
+        nominatim_geocoder: Optional[NominatimGeoProvider] = None,
+        db_path: str = "",
+    ) -> None:
         self._radius_mi = config.poi_radius_mi
+        self._google = google_geocoder
+        self._nominatim = nominatim_geocoder
         path = db_path or DATA_PATH
         self._stops: list[dict] = []
         self._load(path)
@@ -58,8 +72,8 @@ class TruckStopDB(POIProvider):
         if radius_m is not None:
             radius_mi = radius_m / 1609.34
 
-        # Rough bounding box filter first (1 degree lat ≈ 69 mi)
-        deg_margin = radius_mi / 69.0 * 1.15  # 15% margin
+        # Rough bounding box filter (1 degree lat ~ 69 mi)
+        deg_margin = radius_mi / 69.0 * 1.15
         lat_min = lat - deg_margin
         lat_max = lat + deg_margin
         lon_min = lon - deg_margin / max(math.cos(math.radians(lat)), 0.01)
@@ -70,7 +84,6 @@ class TruckStopDB(POIProvider):
             slat = s["lat"]
             slon = s["lon"]
 
-            # Fast bbox reject
             if slat < lat_min or slat > lat_max or slon < lon_min or slon > lon_max:
                 continue
 
@@ -83,11 +96,49 @@ class TruckStopDB(POIProvider):
                     name=s.get("name", "Truck Stop"),
                     lat=slat,
                     lon=slon,
-                    address=s.get("address", "") or "Address unavailable",
+                    address=s.get("address", ""),
                     brand=s.get("brand", ""),
                     distance_mi=round(dist, 1),
                 )
             )
 
         results.sort(key=lambda st: st.distance_mi)
-        return results[:10]
+        top = results[:10]
+
+        # Resolve missing addresses
+        await self._fill_addresses(top)
+
+        return top
+
+    async def _fill_addresses(self, stations: list[Station]) -> None:
+        """Reverse-geocode any station missing a street address."""
+        needs_addr = [s for s in stations if not s.address]
+        if not needs_addr:
+            return
+
+        # Google Maps — fast, parallel, no rate limit issues
+        if self._google and self._google.is_configured:
+            tasks = [self._google.reverse(s.lat, s.lon) for s in needs_addr]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            still_missing = []
+            for station, result in zip(needs_addr, results):
+                if isinstance(result, str) and result:
+                    station.address = result
+                else:
+                    still_missing.append(station)
+            needs_addr = still_missing
+
+        # Nominatim fallback — sequential (1 req/sec rate limit)
+        if needs_addr and self._nominatim:
+            for station in needs_addr:
+                try:
+                    addr = await self._nominatim.reverse(station.lat, station.lon)
+                    if addr:
+                        station.address = addr
+                except Exception:
+                    logger.debug("Reverse geocode failed for %s", station.name)
+
+        # Last resort — show coordinates
+        for station in needs_addr:
+            if not station.address:
+                station.address = f"Near {station.lat:.4f}, {station.lon:.4f}"

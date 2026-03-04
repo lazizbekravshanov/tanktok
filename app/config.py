@@ -71,7 +71,12 @@ class Config:
         )
     )
 
-    # Nominatim
+    # Google Maps (for reverse geocoding truck stop addresses)
+    google_maps_api_key: str = field(
+        default_factory=lambda: os.environ.get("GOOGLE_MAPS_API_KEY", "")
+    )
+
+    # Nominatim (fallback geocoder)
     nominatim_user_agent: str = field(
         default_factory=lambda: os.environ.get(
             "NOMINATIM_USER_AGENT", "TankTok/1.0 (fuel-price-bot)"
