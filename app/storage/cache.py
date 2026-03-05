@@ -23,12 +23,43 @@ class _Encoder(json.JSONEncoder):
         return super().default(o)
 
 
+_DC_REGISTRY: dict = {}
+
+
+def _get_dc_registry() -> dict:
+    """Lazy-load dataclass registry to avoid circular imports."""
+    if not _DC_REGISTRY:
+        from app.providers.base import (
+            ForecastResult,
+            GeoLocation,
+            MarketQuote,
+            PredictionContract,
+            RetailPrices,
+            Station,
+        )
+        _DC_REGISTRY.update({
+            "GeoLocation": GeoLocation,
+            "MarketQuote": MarketQuote,
+            "RetailPrices": RetailPrices,
+            "PredictionContract": PredictionContract,
+            "ForecastResult": ForecastResult,
+            "Station": Station,
+        })
+    return _DC_REGISTRY
+
+
 def _decode_hook(d: dict) -> Any:
     if "__datetime__" in d:
         return datetime.fromisoformat(d["__datetime__"])
     if "__dataclass__" in d:
-        # For cache we store the plain dict — callers know the type
-        d.pop("__dataclass__")
+        cls_name = d.pop("__dataclass__")
+        registry = _get_dc_registry()
+        cls = registry.get(cls_name)
+        if cls:
+            try:
+                return cls(**d)
+            except TypeError:
+                return d
         return d
     return d
 
