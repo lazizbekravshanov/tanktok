@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Optional
@@ -29,8 +30,8 @@ class LovesPriceProvider(StationPriceProvider):
         self._cache = cache
         self._ttl = config.cache_retail_ttl
 
-    async def _fetch_store_prices(self, store_id: str) -> Optional[dict]:
-        """Fetch prices for a single Love's store."""
+    async def _fetch_store_prices(self, store_id: str, session: aiohttp.ClientSession) -> Optional[dict]:
+        """Fetch prices for a single Love's store using a shared session."""
         cache_key = f"loves:store:{store_id}"
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -38,16 +39,15 @@ class LovesPriceProvider(StationPriceProvider):
 
         url = STORE_URL.format(store_id=store_id)
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                    headers={"User-Agent": "TankTok/1.0"},
-                ) as resp:
-                    if resp.status == 404:
-                        return None
-                    resp.raise_for_status()
-                    html = await resp.text()
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=6),
+                headers={"User-Agent": "TankTok/1.0"},
+            ) as resp:
+                if resp.status == 404:
+                    return None
+                resp.raise_for_status()
+                html = await resp.text()
         except Exception:
             logger.debug("Love's store %s fetch failed", store_id)
             return None
@@ -79,22 +79,30 @@ class LovesPriceProvider(StationPriceProvider):
     async def enrich_prices(
         self, stations: list[Station], location: GeoLocation
     ) -> list[Station]:
+        # Collect stations that need Love's prices
+        to_fetch: list[tuple[Station, str]] = []
         for station in stations:
             brand = (station.brand or station.name or "").lower()
             if "love" not in brand:
                 continue
             if station.gas_price is not None or station.diesel_price is not None:
                 continue
-
-            # Extract store ID from name (Love's often has store # in OSM data)
             store_id = self._extract_store_id(station)
-            if not store_id:
-                continue
+            if store_id:
+                to_fetch.append((station, store_id))
 
-            prices = await self._fetch_store_prices(store_id)
-            if prices:
-                station.diesel_price = prices.get("diesel")
-                station.gas_price = prices.get("gas")
+        if not to_fetch:
+            return stations
+
+        # Fetch all Love's stations in parallel with a shared session
+        async with aiohttp.ClientSession() as session:
+            tasks = [self._fetch_store_prices(sid, session) for _, sid in to_fetch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for (station, _), result in zip(to_fetch, results):
+            if isinstance(result, dict) and result:
+                station.diesel_price = result.get("diesel")
+                station.gas_price = result.get("gas")
                 station.price_source = "posted"
 
         return stations

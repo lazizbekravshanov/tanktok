@@ -154,7 +154,7 @@ class BotHandlers:
             )
             return
 
-        # 2. Fetch data
+        # 2. Fetch everything in parallel
         result = await self._fetch_all(location)
 
         # 3. Format and reply
@@ -165,12 +165,17 @@ class BotHandlers:
     async def _fetch_all(self, location: GeoLocation) -> QueryResult:
         result = QueryResult(location=location)
 
-        # Fetch stations, retail avg, markets in parallel
+        # Step 1: Station lookup (instant, local DB) + all network calls in parallel
+        stations_task = self.pois.nearby_stations(location.lat, location.lon)
+        retail_task = self.retail.get_prices(location)
+        markets_task = self.markets.get_quotes()
+        prediction_tasks = [p.get_fuel_contracts() for p in self.prediction_providers]
+
         gathered = await asyncio.gather(
-            self.pois.nearby_stations(location.lat, location.lon),
-            self.retail.get_prices(location),
-            self.markets.get_quotes(),
-            *[p.get_fuel_contracts() for p in self.prediction_providers],
+            stations_task,
+            retail_task,
+            markets_task,
+            *prediction_tasks,
             return_exceptions=True,
         )
 
@@ -201,27 +206,31 @@ class BotHandlers:
             elif pr:
                 result.prediction_contracts.extend(pr)
 
-        # Enrich stations with real prices from Pilot, Love's, TA/Petro
+        # Step 2: Enrich station prices — ALL THREE in parallel
         if result.stations:
-            try:
-                await self.pilot_prices.enrich_prices(result.stations, location)
-            except Exception:
-                logger.exception("Pilot price enrichment failed")
+            await asyncio.gather(
+                self._safe_enrich(self.pilot_prices, result.stations, location),
+                self._safe_enrich(self.loves_prices, result.stations, location),
+                self._safe_enrich(self.tapetro_prices, result.stations, location),
+            )
 
-            try:
-                await self.loves_prices.enrich_prices(result.stations, location)
-            except Exception:
-                logger.exception("Love's price enrichment failed")
-
-            try:
-                await self.tapetro_prices.enrich_prices(result.stations, location)
-            except Exception:
-                logger.exception("TA/Petro price enrichment failed")
-
-        # Forecasts
+        # Forecasts (instant, just math)
         result.forecasts = generate_forecasts(result.retail_prices, result.market_quotes)
 
         return result
+
+    @staticmethod
+    async def _safe_enrich(provider, stations, location):
+        """Run a price enrichment with a timeout so one slow provider can't block everything."""
+        try:
+            await asyncio.wait_for(
+                provider.enrich_prices(stations, location),
+                timeout=8.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("%s price enrichment timed out", type(provider).__name__)
+        except Exception:
+            logger.exception("%s price enrichment failed", type(provider).__name__)
 
     # ---- Formatting (simple, driver-friendly) ----
 
@@ -230,7 +239,6 @@ class BotHandlers:
 
         loc = r.location
         loc_name = loc.display_name if loc else query
-        # Shorten long names
         if len(loc_name) > 50:
             loc_name = loc_name[:47] + "..."
         parts.append(f"<b>Truck Stops near {_esc(loc_name)}</b>\n")
@@ -278,7 +286,6 @@ class BotHandlers:
         dist = f"{s.distance_mi:.1f} mi"
         addr = _esc(s.address) if s.address else "Address unavailable"
 
-        # Price line
         prices = []
         if s.diesel_price is not None:
             prices.append(f"Diesel <b>${s.diesel_price:.2f}</b>")

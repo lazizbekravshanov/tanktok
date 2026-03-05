@@ -22,10 +22,19 @@ class GoogleGeocoder:
         self._api_key = config.google_maps_api_key
         self._cache = cache
         self._ttl = config.cache_geocode_ttl  # 30 days
+        self._session: Optional[aiohttp.ClientSession] = None
 
     @property
     def is_configured(self) -> bool:
         return bool(self._api_key)
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Reuse a single aiohttp session for all requests."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=5)
+            )
+        return self._session
 
     async def reverse(self, lat: float, lon: float) -> Optional[str]:
         """Reverse-geocode lat/lon → formatted street address."""
@@ -43,17 +52,13 @@ class GoogleGeocoder:
             "result_type": "street_address|premise|point_of_interest",
         }
 
+        session = await self._get_session()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    self.BASE_URL,
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
+            async with session.get(self.BASE_URL, params=params) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
         except Exception:
-            logger.exception("Google geocode request failed")
+            logger.debug("Google geocode request failed for %.4f,%.4f", lat, lon)
             return None
 
         results = data.get("results", [])
@@ -61,25 +66,19 @@ class GoogleGeocoder:
             # Retry without result_type filter
             params.pop("result_type", None)
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        self.BASE_URL,
-                        params=params,
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        resp.raise_for_status()
-                        data = await resp.json()
-                        results = data.get("results", [])
+                async with session.get(self.BASE_URL, params=params) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    results = data.get("results", [])
             except Exception:
                 return None
 
         if not results:
             return None
 
-        # Use the first result's formatted address
         address = results[0].get("formatted_address", "")
 
-        # Clean up — remove "USA" / "United States" suffix for brevity
+        # Clean up — remove "USA" suffix for brevity
         for suffix in (", USA", ", United States"):
             if address.endswith(suffix):
                 address = address[: -len(suffix)]

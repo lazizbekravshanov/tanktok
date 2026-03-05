@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -33,24 +34,23 @@ class TAPetroPriceProvider(StationPriceProvider):
         self._ttl = config.cache_retail_ttl
         self._slug_map: dict[str, str] = {}  # "ta-porter" → "/location/in/ta-porter/"
 
-    async def _fetch_store_prices(self, url: str) -> Optional[dict]:
-        """Fetch prices from a single TA/Petro location page."""
+    async def _fetch_store_prices(self, url: str, session: aiohttp.ClientSession) -> Optional[dict]:
+        """Fetch prices from a single TA/Petro location page using a shared session."""
         cache_key = f"tapetro:{url}"
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                    headers={"User-Agent": "TankTok/1.0"},
-                ) as resp:
-                    if resp.status == 404:
-                        return None
-                    resp.raise_for_status()
-                    html = await resp.text()
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=6),
+                headers={"User-Agent": "TankTok/1.0"},
+            ) as resp:
+                if resp.status == 404:
+                    return None
+                resp.raise_for_status()
+                html = await resp.text()
         except Exception:
             logger.debug("TA/Petro fetch failed: %s", url)
             return None
@@ -96,6 +96,8 @@ class TAPetroPriceProvider(StationPriceProvider):
     async def enrich_prices(
         self, stations: list[Station], location: GeoLocation
     ) -> list[Station]:
+        # Collect stations that need TA/Petro prices
+        to_fetch: list[tuple[Station, str]] = []
         for station in stations:
             brand = (station.brand or station.name or "").lower()
             if not any(kw in brand for kw in ("ta ", "travel centers", "travelcenters", "petro")):
@@ -105,13 +107,21 @@ class TAPetroPriceProvider(StationPriceProvider):
                 continue
 
             url = self._build_url(station)
-            if not url:
-                continue
+            if url:
+                to_fetch.append((station, url))
 
-            prices = await self._fetch_store_prices(url)
-            if prices:
-                station.diesel_price = prices.get("diesel")
-                station.gas_price = prices.get("gas")
+        if not to_fetch:
+            return stations
+
+        # Fetch all TA/Petro stations in parallel with a shared session
+        async with aiohttp.ClientSession() as session:
+            tasks = [self._fetch_store_prices(url, session) for _, url in to_fetch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for (station, _), result in zip(to_fetch, results):
+            if isinstance(result, dict) and result:
+                station.diesel_price = result.get("diesel")
+                station.gas_price = result.get("gas")
                 station.price_source = "posted"
 
         return stations
