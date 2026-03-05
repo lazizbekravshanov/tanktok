@@ -1,10 +1,10 @@
 <p align="center">
-  <h1 align="center">⛽ TankTok</h1>
+  <h1 align="center">TankTok</h1>
   <p align="center">
-    <em>Real-time fuel prices & nearby stations — right in Telegram.</em>
+    <em>Truck stop fuel prices — instant, in Telegram.</em>
   </p>
   <p align="center">
-    <img src="https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white" alt="Python">
+    <img src="https://img.shields.io/badge/python-3.9+-blue?logo=python&logoColor=white" alt="Python">
     <img src="https://img.shields.io/badge/telegram-bot-26A5E4?logo=telegram&logoColor=white" alt="Telegram">
     <img src="https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
@@ -13,53 +13,71 @@
 
 ---
 
-Send a **ZIP code** or **city name** → get gas & diesel prices, nearby stations, energy markets, and a 7-day forecast.
+Send a **ZIP code** or **city name** to the Telegram bot. Get nearby truck stops with real diesel and gas prices — instantly.
 
-## ✨ Features
+## What It Does
 
-| | Feature | Details |
-|---|---|---|
-| 📊 | **Area prices** | Regular gas + diesel from U.S. EIA (weekly) |
-| 📍 | **Nearby stations** | Top 10 fuel stops via OpenStreetMap / Overpass |
-| 💰 | **Station prices** | Posted prices when a plugin is configured |
-| 📈 | **Market snapshot** | WTI crude, RBOB gasoline, Heating Oil futures |
-| 🔮 | **7-day forecast** | Naive model using retail history + futures trend |
-| 🎲 | **Prediction markets** | Kalshi integration (REST + WebSocket) with live energy contracts |
-| 🔌 | **Plugin architecture** | Add price feeds via env vars — zero code changes |
+TankTok is a Telegram bot built for **truck drivers**. Type a location and get:
 
-## 🚀 Quick Start
+- **Nearby truck stops** within 50 miles (Pilot, Flying J, Love's, TA, Petro, and 3,700+ more)
+- **Real fuel prices** scraped live from Pilot/Flying J, Love's, and TA/Petro websites
+- **WTI oil price** from Yahoo Finance (refreshed every 5 min)
+- **Kalshi prediction markets** for energy contracts (optional)
 
-### 1️⃣ Prerequisites
+### How It Works
 
-- Python 3.11+
-- A [Telegram Bot Token](https://core.telegram.org/bots#botfather) from **@BotFather**
-- *(Recommended)* An [EIA API Key](https://www.eia.gov/opendata/register.php) — free
+The bot uses a **two-phase response** for speed:
 
-### 2️⃣ Clone & install
+1. **Phase 1 (instant)** — Looks up stations from a local database of 3,759 US truck stops, applies cached Pilot/Flying J prices from memory, and sends the message. User sees results in under 1 second.
+2. **Phase 2 (background)** — Fetches Love's and TA/Petro prices in parallel, then edits the message with updated prices.
+
+### Example Response
+
+```
+Truck Stops near Dallas, TX
+
+1. Pilot — 2.1 mi
+   1234 I-35E S, Dallas, TX 75201
+   D: $3.45 | G: $2.89
+
+2. Love's — 4.8 mi
+   5678 US-75, Richardson, TX 75080
+   D: $3.42 | G: $2.85
+
+3. Flying J — 7.3 mi
+   910 I-20 W, Grand Prairie, TX 75051
+   D: $3.48 | G: $2.91
+
+WTI: $71.23 (+0.8%)
+```
+
+## Quick Start
+
+### 1. Clone & install
 
 ```bash
-git clone https://github.com/youruser/tanktok.git
+git clone https://github.com/lazizbekravshanov/tanktok.git
 cd tanktok
 pip install -r requirements.txt
 ```
 
-### 3️⃣ Configure
+### 2. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env with your tokens
+# Add your TELEGRAM_BOT_TOKEN (required)
+# Add EIA_API_KEY for area average prices (free, recommended)
 ```
 
-### 4️⃣ Run
+### 3. Run
 
 ```bash
 python -m app.main
 ```
 
-## 🐳 Docker
+## Docker
 
 ```bash
-# Build & run
 docker compose up -d
 
 # Or without Compose
@@ -67,144 +85,85 @@ docker build -t tanktok .
 docker run --env-file .env tanktok
 ```
 
-## ⚙️ Environment Variables
+## Environment Variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | ✅ | Bot token from @BotFather |
-| `EIA_API_KEY` | 📌 Recommended | U.S. EIA API key (free) |
-| `CROWD_API_KEY` | ❌ | Crowd-sourced station price API key |
-| `CROWD_API_BASE` | ❌ | Base URL for crowd-sourced API |
-| `COMMERCIAL_FEED_KEY` | ❌ | Commercial station price feed key |
-| `COMMERCIAL_FEED_BASE` | ❌ | Base URL for commercial feed |
-| `KALSHI_KEY_ID` | ❌ | Kalshi API key ID ([generate here](https://kalshi.com/account/api-keys)) |
-| `KALSHI_PRIVATE_KEY_PATH` | ❌ | Path to Kalshi RSA private key PEM file |
-| `KALSHI_USE_WEBSOCKET` | ❌ | `true` (default) for live streaming, `false` for REST only |
-| `KALSHI_POLL_INTERVAL` | ❌ | REST poll interval in seconds (default: `45`) |
-| `POLYMARKET_API_TOKEN` | ❌ | Polymarket API token |
-| `NOMINATIM_USER_AGENT` | ❌ | Custom User-Agent for Nominatim |
-| `TANKTOK_DB_PATH` | ❌ | SQLite cache path (default: `tanktok_cache.db`) |
+| `TELEGRAM_BOT_TOKEN` | Yes | Bot token from [@BotFather](https://t.me/BotFather) |
+| `EIA_API_KEY` | Recommended | [U.S. EIA API key](https://www.eia.gov/opendata/register.php) (free) — area average prices |
+| `GOOGLE_MAPS_API_KEY` | No | Google Maps — better address resolution |
+| `KALSHI_KEY_ID` | No | Kalshi API key for prediction markets |
+| `KALSHI_PRIVATE_KEY_PATH` | No | Path to Kalshi RSA private key PEM |
+| `KALSHI_USE_WEBSOCKET` | No | `true` for live streaming, `false` for REST polling |
+| `NOMINATIM_USER_AGENT` | No | Custom User-Agent for Nominatim geocoding |
 
-## 💬 Bot Commands
+## Price Sources
 
-| Command | Description |
-|---|---|
-| `/start` | Welcome message + examples |
-| `/help` | Usage guide + data sources |
-| `/sources` | Show enabled/disabled providers |
-| `/setunits` | Unit settings (gallon — more coming) |
+| Chain | Method | Coverage |
+|---|---|---|
+| **Pilot / Flying J / One9** | Bulk JSON endpoint — all 876+ locations in one call | All US locations |
+| **Love's** | Per-store HTML scraping | Stores with ID in OSM data |
+| **TA / Petro** | JSON-LD structured data from location pages | Stations with valid URL slug |
+| **Area average** | U.S. EIA weekly retail prices by PADD region | All US (requires API key) |
 
-## 📱 Example Response
-
-```
-⛽ TankTok — Cincinnati, OH, USA
-
-📊 Area Prices — PADD 2
-  Regular Gas: $3.287/gal  ▼ $0.012 (weekly)
-  Diesel: $3.891/gal  ▲ $0.005 (weekly)
-  Source: U.S. EIA (2025-02-24)
-
-📍 Nearby Stations
-  1. Shell (0.3 mi)
-     123 Main St, Cincinnati OH
-     price unavailable
-  2. BP (0.7 mi)
-     456 Vine St, Cincinnati OH
-     price unavailable
-  ...
-
-📈 Market Snapshot
-  WTI Crude Oil: $72.15  ▼ 1.23%
-  RBOB Gasoline: $2.48  ▲ 0.45%
-  Heating Oil (ULSD proxy): $2.71  ▼ 0.18%
-
-🔮 7-Day Forecast
-  Regular Gasoline: $3.245 – $3.329/gal
-  Diesel: $3.841 – $3.941/gal
-    Confidence: Medium — based on weekly EIA data + futures
-
-🎲 Prediction Markets
-
-  US Gas Price
-  • Will gas exceed $3.25/gal? ⚡
-    Bid $0.45 / Ask $0.48 | Last $0.46 vol:1,234
-  • Will gas exceed $3.50/gal? ⚡
-    Bid $0.22 / Ask $0.25 | Last $0.23 vol:567
-
-  WTI Oil
-  • WTI above $68 on Mar 2? ⚡
-    Bid $0.61 / Ask $0.64 | Last $0.62 vol:2,100
-
-  ⚡ = live via Kalshi WebSocket
-
-🕐 2025-02-25 14:32 UTC
-```
-
-## 🏗️ Architecture
+## Architecture
 
 ```
 app/
-├── main.py                 # Entry point
-├── config.py               # Env var config
-├── handlers.py             # Telegram handlers + formatting
+├── main.py                    # Entry point + lifecycle hooks
+├── config.py                  # Env var configuration
+├── handlers.py                # Telegram handlers — two-phase response
 ├── providers/
-│   ├── base.py             # Interfaces & data models
-│   ├── geocode_osm.py      # Nominatim geocoding
-│   ├── pois_overpass.py     # Overpass fuel station POIs
-│   ├── retail_eia.py       # EIA retail prices
-│   ├── markets_yfinance.py # yfinance energy futures
-│   ├── prediction_base.py  # Disabled prediction stub
-│   ├── prediction_kalshi.py # Kalshi REST + WebSocket (RSA-PSS auth)
-│   └── prediction_polymarket.py
+│   ├── base.py                # Data models + abstract interfaces
+│   ├── geocode_osm.py         # Nominatim geocoding + reverse geocoding
+│   ├── geocode_google.py      # Google Maps reverse geocoding
+│   ├── pois_truckstops.py     # Local truck stop DB (3,759 locations)
+│   ├── prices_pilot.py        # Pilot/FJ/One9 bulk price fetcher
+│   ├── prices_loves.py        # Love's per-store price scraper
+│   ├── prices_tapetro.py      # TA/Petro JSON-LD price scraper
+│   ├── retail_eia.py          # EIA area average prices
+│   ├── markets_yfinance.py    # WTI, RBOB, Heating Oil futures
+│   ├── prediction_kalshi.py   # Kalshi REST + WebSocket (RSA-PSS auth)
+│   ├── prediction_polymarket.py
+│   └── prediction_base.py
 ├── forecasting/
-│   └── model.py            # Simple price forecast
-└── storage/
-    └── cache.py            # SQLite cache with TTL
+│   └── model.py               # Simple 7-day price forecast
+├── storage/
+│   └── cache.py               # SQLite cache with TTL + dataclass reconstruction
+data/
+│   └── truckstops.json        # Pre-built database of 3,759 US truck stops
+scripts/
+│   ├── build_truckstop_db.py  # Fetch truck stops from OpenStreetMap
+│   └── fill_addresses.py      # Batch reverse-geocode missing addresses
+tests/
+│   ├── test_parsing.py
+│   ├── test_providers.py
+│   ├── test_cache.py
+│   └── test_kalshi.py
 ```
 
-### 🎲 Kalshi Integration
+### Performance
 
-TankTok connects to [Kalshi](https://kalshi.com) for real-time energy prediction markets:
+- **Station lookup**: < 50ms (local JSON database with bounding-box pre-filter + haversine)
+- **Pilot prices**: Pre-loaded on startup, refreshed every 5 min in background
+- **Market data**: Pre-warmed on startup, refreshed every 5 min in background
+- **Love's / TA/Petro**: Parallel per-station HTTP with 4-second timeout
+- **Geocoding**: Nominatim with 30-day cache (instant on repeat queries)
+- **Address coverage**: 77% pre-baked, rest show coordinates
 
-| Series | Ticker | Description |
-|---|---|---|
-| US Gas Price | `KXAAAGASM` | Monthly contracts on US average gas prices |
-| WTI Oil Daily | `KXWTI` | Daily contracts on WTI crude settlement |
-| WTI Oil Weekly | `KXWTIW` | Weekly contracts on WTI crude Friday close |
-
-**Two modes:**
-
-| Mode | Auth Required | Latency | How |
-|---|---|---|---|
-| **Public REST** | No | ~45s polling | Default — works out of the box |
-| **WebSocket** | Yes (RSA key) | Sub-second | Set `KALSHI_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` |
-
-To enable WebSocket streaming:
-1. Go to [Kalshi API Keys](https://kalshi.com/account/api-keys)
-2. Generate an RSA key pair — **save the private key immediately**
-3. Set `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` in `.env`
-
-The bot auto-discovers all open energy contracts on startup and re-discovers hourly.
-
-### 🔌 Adding a price provider
-
-1. Implement `StationPriceProvider` from `app/providers/base.py`
-2. Add env vars for API credentials in `config.py`
-3. Wire it into `BotHandlers.__init__()` in `handlers.py`
-4. Station prices will show as **"posted"** in responses
-
-## 🧪 Tests
+## Tests
 
 ```bash
 pytest tests/ -v
+# 58 tests
 ```
 
-## 📄 License
+## License
 
 MIT
 
 ---
 
 <p align="center">
-  <sub>Built with 🛢️ by TankTok — data from EIA, OpenStreetMap, Yahoo Finance</sub>
+  <sub>Built for drivers. Data from Pilot, Love's, TA/Petro, EIA, OpenStreetMap, Yahoo Finance, Kalshi.</sub>
 </p>
