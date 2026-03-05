@@ -1,11 +1,10 @@
-"""Telegram bot handlers for TankTok."""
+"""Telegram bot handlers for TankTok — two-phase response for speed."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
-from datetime import datetime, timezone
 from typing import Optional
 
 from telegram import Update
@@ -15,10 +14,8 @@ from telegram.ext import ContextTypes
 from app.config import Config
 from app.forecasting.model import generate_forecasts
 from app.providers.base import (
-    ForecastResult,
     GeoLocation,
     MarketQuote,
-    PredictionContract,
     QueryResult,
     RetailPrices,
     Station,
@@ -27,7 +24,6 @@ from app.providers.geocode_google import GoogleGeocoder
 from app.providers.geocode_osm import NominatimGeoProvider
 from app.providers.markets_yfinance import YFinanceMarketProvider
 from app.providers.pois_truckstops import TruckStopDB
-from app.providers.prediction_base import DisabledPredictionProvider
 from app.providers.prediction_kalshi import KalshiPredictionProvider
 from app.providers.prediction_polymarket import PolymarketPredictionProvider
 from app.providers.prices_loves import LovesPriceProvider
@@ -49,11 +45,7 @@ class BotHandlers:
         # Core providers
         self.geo = NominatimGeoProvider(config, cache)
         self.google_geo = GoogleGeocoder(config, cache)
-        self.pois = TruckStopDB(
-            config,
-            google_geocoder=self.google_geo,
-            nominatim_geocoder=self.geo,
-        )
+        self.pois = TruckStopDB(config)  # no runtime geocoding — addresses are pre-baked
         self.retail = EIARetailProvider(config, cache)
         self.markets = YFinanceMarketProvider(config, cache)
 
@@ -70,69 +62,84 @@ class BotHandlers:
         if polymarket.is_configured():
             self.prediction_providers.append(polymarket)
 
+        # Background market data (refreshed every 5 min)
+        self._cached_markets: list[MarketQuote] = []
+        self._cached_retail: dict = {}  # state → RetailPrices
+        self._bg_task: Optional[asyncio.Task] = None
+
     async def startup(self) -> None:
         """Called once when the bot starts."""
         try:
             await self.kalshi.start()
         except Exception:
-            logger.exception("Kalshi startup failed — will use REST fallback")
+            logger.exception("Kalshi startup failed")
 
-        # Pre-fetch all Pilot/Flying J prices (one bulk call)
+        # Pre-fetch Pilot prices (one bulk call, all 876+ locations)
         try:
             await self.pilot_prices.fetch_all()
             logger.info("Pilot prices pre-loaded")
         except Exception:
             logger.exception("Pilot price pre-fetch failed")
 
+        # Pre-warm market data
+        try:
+            self._cached_markets = await self.markets.get_quotes()
+            logger.info("Market data pre-warmed")
+        except Exception:
+            logger.exception("Market data pre-warm failed")
+
+        # Start background refresh loop
+        self._bg_task = asyncio.create_task(self._background_refresh())
+
     async def shutdown(self) -> None:
-        """Called on bot shutdown."""
+        if self._bg_task:
+            self._bg_task.cancel()
         try:
             await self.kalshi.stop()
         except Exception:
             logger.exception("Kalshi shutdown error")
 
+    async def _background_refresh(self) -> None:
+        """Refresh market data and Pilot prices every 5 minutes."""
+        while True:
+            await asyncio.sleep(300)  # 5 minutes
+            try:
+                self._cached_markets = await self.markets.get_quotes()
+                await self.pilot_prices.fetch_all()
+                logger.info("Background refresh done")
+            except Exception:
+                logger.exception("Background refresh failed")
+
     # ---- Commands ----
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        text = (
+        await update.message.reply_text(
             "<b>TankTok</b>\n\n"
             "Send a <b>ZIP code</b> or <b>city name</b>\n"
-            "and I'll find nearby truck stops with prices.\n\n"
-            "<b>Try it:</b>\n"
-            "  <code>45202</code>\n"
-            "  <code>Dallas TX</code>\n"
-        )
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        text = (
-            "<b>TankTok — Help</b>\n\n"
-            "Type a US ZIP code or city name.\n"
-            "You'll get truck stops nearby with diesel and gas prices.\n\n"
-            "<b>Commands:</b>\n"
-            "  /help — this message\n"
-            "  /sources — data sources"
-        )
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-    async def cmd_sources(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        n_stops = len(self.pois._stops) if hasattr(self.pois, '_stops') else 0
-        lines = [
-            "<b>Data Sources</b>\n",
-            f"Truck stops: {n_stops:,} locations",
-            "Prices: Pilot/FJ, Love's, TA/Petro (live)",
-            "Area avg: U.S. EIA",
-            "Markets: Yahoo Finance",
-        ]
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
-
-    async def cmd_setunits(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(
-            "Units: <b>$/gallon</b> (US gallons)",
+            "to find truck stops with prices.\n\n"
+            "<b>Try:</b>  <code>45202</code>  or  <code>Dallas TX</code>",
             parse_mode=ParseMode.HTML,
         )
 
-    # ---- Main message handler ----
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.message.reply_text(
+            "<b>TankTok</b> — Type a ZIP or city name.\n"
+            "/help — this message\n"
+            "/sources — data sources",
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def cmd_sources(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        n = len(self.pois._stops) if hasattr(self.pois, '_stops') else 0
+        await update.message.reply_text(
+            f"<b>Sources:</b> {n:,} truck stops | Pilot/FJ, Love's, TA/Petro prices | EIA | Yahoo Finance",
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def cmd_setunits(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.message.reply_text("Units: <b>$/gallon</b>", parse_mode=ParseMode.HTML)
+
+    # ---- Main message handler — TWO-PHASE RESPONSE ----
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = (update.message.text or "").strip()
@@ -141,191 +148,106 @@ class BotHandlers:
 
         await update.message.chat.send_action("typing")
 
-        query = text
-        is_zip = bool(ZIP_RE.match(text))
-
-        # 1. Geocode
-        location = await self.geo.geocode(query)
+        # Phase 0: Geocode (uses cache after first call)
+        location = await self.geo.geocode(text)
         if location is None:
             await update.message.reply_text(
-                "Could not find that location.\n"
-                "Try a ZIP code or <code>City, ST</code>",
+                "Location not found. Try a ZIP or <code>City, ST</code>",
                 parse_mode=ParseMode.HTML,
             )
             return
 
-        # 2. Fetch everything in parallel
-        result = await self._fetch_all(location)
+        # Phase 1: INSTANT — station list from local DB (< 50ms)
+        stations = await self.pois.nearby_stations(location.lat, location.lon)
 
-        # 3. Format and reply
-        reply = self._format_reply(result, query)
-        for chunk in _split_message(reply, 4096):
-            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        # Apply Pilot prices immediately (already in memory)
+        if stations:
+            try:
+                await self.pilot_prices.enrich_prices(stations, location)
+            except Exception:
+                pass
 
-    async def _fetch_all(self, location: GeoLocation) -> QueryResult:
-        result = QueryResult(location=location)
+        # Send Phase 1 immediately
+        loc_name = location.display_name
+        if len(loc_name) > 50:
+            loc_name = loc_name[:47] + "..."
 
-        # Step 1: Station lookup (instant, local DB) + all network calls in parallel
-        stations_task = self.pois.nearby_stations(location.lat, location.lon)
-        retail_task = self.retail.get_prices(location)
-        markets_task = self.markets.get_quotes()
-        prediction_tasks = [p.get_fuel_contracts() for p in self.prediction_providers]
+        phase1_text = _format_stations(loc_name, stations, self._cached_markets)
+        msg = await update.message.reply_text(phase1_text, parse_mode=ParseMode.HTML)
 
-        gathered = await asyncio.gather(
-            stations_task,
-            retail_task,
-            markets_task,
-            *prediction_tasks,
-            return_exceptions=True,
+        # Phase 2: BACKGROUND — fetch Love's + TA/Petro prices, then edit
+        changed = await self._enrich_and_fetch(stations, location)
+
+        if changed:
+            phase2_text = _format_stations(loc_name, stations, self._cached_markets)
+            try:
+                await msg.edit_text(phase2_text, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass  # message unchanged or edit failed — no big deal
+
+    async def _enrich_and_fetch(self, stations: list[Station], location: GeoLocation) -> bool:
+        """Fetch Love's + TA/Petro prices in parallel. Returns True if any prices were added."""
+        if not stations:
+            return False
+
+        before = sum(1 for s in stations if s.diesel_price is not None or s.gas_price is not None)
+
+        await asyncio.gather(
+            self._safe_enrich(self.loves_prices, stations, location, timeout=4.0),
+            self._safe_enrich(self.tapetro_prices, stations, location, timeout=4.0),
         )
 
-        pois_result = gathered[0]
-        retail_result = gathered[1]
-        markets_result = gathered[2]
-        prediction_results = gathered[3:]
-
-        if isinstance(pois_result, Exception):
-            logger.exception("POI fetch failed", exc_info=pois_result)
-            result.errors.append("Station lookup failed.")
-        else:
-            result.stations = pois_result or []
-
-        if isinstance(retail_result, Exception):
-            logger.exception("Retail fetch failed", exc_info=retail_result)
-        else:
-            result.retail_prices = retail_result
-
-        if isinstance(markets_result, Exception):
-            logger.exception("Market fetch failed", exc_info=markets_result)
-        else:
-            result.market_quotes = markets_result or []
-
-        for pr in prediction_results:
-            if isinstance(pr, Exception):
-                logger.exception("Prediction fetch failed", exc_info=pr)
-            elif pr:
-                result.prediction_contracts.extend(pr)
-
-        # Step 2: Enrich station prices — ALL THREE in parallel
-        if result.stations:
-            await asyncio.gather(
-                self._safe_enrich(self.pilot_prices, result.stations, location),
-                self._safe_enrich(self.loves_prices, result.stations, location),
-                self._safe_enrich(self.tapetro_prices, result.stations, location),
-            )
-
-        # Forecasts (instant, just math)
-        result.forecasts = generate_forecasts(result.retail_prices, result.market_quotes)
-
-        return result
+        after = sum(1 for s in stations if s.diesel_price is not None or s.gas_price is not None)
+        return after > before
 
     @staticmethod
-    async def _safe_enrich(provider, stations, location):
-        """Run a price enrichment with a timeout so one slow provider can't block everything."""
+    async def _safe_enrich(provider, stations, location, timeout=4.0):
         try:
             await asyncio.wait_for(
                 provider.enrich_prices(stations, location),
-                timeout=8.0,
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
-            logger.warning("%s price enrichment timed out", type(provider).__name__)
+            logger.warning("%s timed out", type(provider).__name__)
         except Exception:
-            logger.exception("%s price enrichment failed", type(provider).__name__)
+            logger.exception("%s failed", type(provider).__name__)
 
-    # ---- Formatting (simple, driver-friendly) ----
 
-    def _format_reply(self, r: QueryResult, query: str) -> str:
-        parts: list[str] = []
+# ---- Formatting (stateless functions) ----
 
-        loc = r.location
-        loc_name = loc.display_name if loc else query
-        if len(loc_name) > 50:
-            loc_name = loc_name[:47] + "..."
-        parts.append(f"<b>Truck Stops near {_esc(loc_name)}</b>\n")
+def _format_stations(loc_name: str, stations: list[Station], markets: list[MarketQuote]) -> str:
+    parts = [f"<b>Truck Stops near {_esc(loc_name)}</b>\n"]
 
-        # ---- Stations with prices ----
-        if r.stations:
-            for i, s in enumerate(r.stations[:10], 1):
-                parts.append(self._fmt_station(i, s))
-        else:
-            parts.append("<i>No truck stops found in this area.</i>\n")
+    if stations:
+        for i, s in enumerate(stations[:10], 1):
+            name = _esc(s.name)
+            dist = f"{s.distance_mi:.1f} mi"
+            addr = _esc(s.address) if s.address else f"Near {s.lat:.4f}, {s.lon:.4f}"
 
-        # ---- Area average (one line) ----
-        if r.retail_prices:
-            rp = r.retail_prices
-            avg_parts = []
-            if rp.diesel is not None:
-                avg_parts.append(f"Diesel ${rp.diesel:.2f}")
-            if rp.regular_gas is not None:
-                avg_parts.append(f"Gas ${rp.regular_gas:.2f}")
-            if avg_parts:
-                parts.append(f"\n<b>Area avg ({_esc(rp.region)}):</b> {' | '.join(avg_parts)}")
+            prices = []
+            if s.diesel_price is not None:
+                prices.append(f"D: <b>${s.diesel_price:.2f}</b>")
+            if s.gas_price is not None:
+                prices.append(f"G: <b>${s.gas_price:.2f}</b>")
+            price_line = " | ".join(prices) if prices else "<i>no price</i>"
 
-        # ---- Market (one line, WTI only) ----
-        if r.market_quotes:
-            wti = next((q for q in r.market_quotes if "WTI" in q.symbol.upper() or "CL" in q.symbol.upper()), None)
-            if wti:
-                arrow = "+" if wti.change_pct >= 0 else ""
-                parts.append(f"<b>Oil (WTI):</b> ${wti.price:.2f} ({arrow}{wti.change_pct:.1f}%)")
+            parts.append(
+                f"{i}. <b>{name}</b> — {dist}\n"
+                f"   {addr}\n"
+                f"   {price_line}\n"
+            )
+    else:
+        parts.append("<i>No truck stops found nearby.</i>\n")
 
-        # ---- Forecast (compact) ----
-        if r.forecasts:
-            fc_parts = []
-            for f in r.forecasts:
-                label = "Diesel" if "diesel" in f.fuel_type.lower() else "Gas"
-                fc_parts.append(f"{label} ${f.low:.2f}-${f.high:.2f}")
-            if fc_parts:
-                parts.append(f"<b>7-day forecast:</b> {' | '.join(fc_parts)}")
+    # Market snapshot (from pre-cached data, instant)
+    if markets:
+        wti = next((q for q in markets if "CL" in q.symbol.upper() or "WTI" in q.symbol.upper()), None)
+        if wti:
+            arrow = "+" if wti.change_pct >= 0 else ""
+            parts.append(f"<b>WTI:</b> ${wti.price:.2f} ({arrow}{wti.change_pct:.1f}%)")
 
-        return "\n".join(parts)
-
-    @staticmethod
-    def _fmt_station(idx: int, s: Station) -> str:
-        """Format a single station — clean and scannable."""
-        name = _esc(s.name)
-        dist = f"{s.distance_mi:.1f} mi"
-        addr = _esc(s.address) if s.address else "Address unavailable"
-
-        prices = []
-        if s.diesel_price is not None:
-            prices.append(f"Diesel <b>${s.diesel_price:.2f}</b>")
-        if s.gas_price is not None:
-            prices.append(f"Gas <b>${s.gas_price:.2f}</b>")
-
-        if prices:
-            price_line = " | ".join(prices)
-        else:
-            price_line = "<i>prices unavailable</i>"
-
-        return (
-            f"{idx}. <b>{name}</b> — {dist}\n"
-            f"   {addr}\n"
-            f"   {price_line}\n"
-        )
+    return "\n".join(parts)
 
 
 def _esc(text: str) -> str:
-    """Escape HTML special characters for Telegram."""
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-
-
-def _split_message(text: str, limit: int) -> list[str]:
-    """Split a long message into chunks at newline boundaries."""
-    if len(text) <= limit:
-        return [text]
-
-    chunks: list[str] = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text)
-            break
-        idx = text.rfind("\n", 0, limit)
-        if idx == -1:
-            idx = limit
-        chunks.append(text[:idx])
-        text = text[idx:].lstrip("\n")
-    return chunks
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

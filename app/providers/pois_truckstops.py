@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
 import os
-from typing import TYPE_CHECKING, Optional
 
 from app.config import Config
 from app.providers.base import POIProvider, Station
-
-if TYPE_CHECKING:
-    from app.providers.geocode_google import GoogleGeocoder
-    from app.providers.geocode_osm import NominatimGeoProvider
 
 logger = logging.getLogger(__name__)
 
@@ -40,16 +34,8 @@ class TruckStopDB(POIProvider):
     Uses bounding-box pre-filter + haversine for radius search.
     """
 
-    def __init__(
-        self,
-        config: Config,
-        google_geocoder: Optional[GoogleGeocoder] = None,
-        nominatim_geocoder: Optional[NominatimGeoProvider] = None,
-        db_path: str = "",
-    ) -> None:
+    def __init__(self, config: Config, db_path: str = "") -> None:
         self._radius_mi = config.poi_radius_mi
-        self._google = google_geocoder
-        self._nominatim = nominatim_geocoder
         path = db_path or DATA_PATH
         self._stops: list[dict] = []
         self._load(path)
@@ -102,47 +88,4 @@ class TruckStopDB(POIProvider):
             )
 
         results.sort(key=lambda st: st.distance_mi)
-        top = results[:10]
-
-        # Fast address resolution — 3 second timeout, don't block the response
-        try:
-            await asyncio.wait_for(self._fill_addresses(top), timeout=3.0)
-        except asyncio.TimeoutError:
-            logger.warning("Address resolution timed out — using fallbacks")
-            for s in top:
-                if not s.address:
-                    s.address = f"Near {s.lat:.4f}, {s.lon:.4f}"
-
-        return top
-
-    async def _fill_addresses(self, stations: list[Station]) -> None:
-        """Reverse-geocode any station missing a street address."""
-        needs_addr = [s for s in stations if not s.address]
-        if not needs_addr:
-            return
-
-        # Google Maps — fast, parallel
-        if self._google and self._google.is_configured:
-            async with _shared_google_session() as session:
-                tasks = [self._google.reverse(s.lat, s.lon) for s in needs_addr]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                still_missing = []
-                for station, result in zip(needs_addr, results):
-                    if isinstance(result, str) and result:
-                        station.address = result
-                    else:
-                        still_missing.append(station)
-                needs_addr = still_missing
-
-        # For any still missing, just show coordinates (don't wait for slow Nominatim)
-        for station in needs_addr:
-            if not station.address:
-                station.address = f"Near {station.lat:.4f}, {station.lon:.4f}"
-
-
-class _shared_google_session:
-    """Context manager placeholder — Google geocoder manages its own sessions."""
-    async def __aenter__(self):
-        return self
-    async def __aexit__(self, *args):
-        pass
+        return results[:10]
